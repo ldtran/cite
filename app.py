@@ -276,7 +276,7 @@ def generate_docx(citation_texts):
 # ================================================================
 
 st.title("📄 Citation Generator")
-st.markdown("Generate formatted citations for Ontario government documents automatically.")
+st.markdown("Generate formatted citations for a variety of sources automatically.")
 
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -361,6 +361,7 @@ if generate_btn:
                 file_name="Citations.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+
 
 
 
