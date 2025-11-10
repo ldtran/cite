@@ -20,12 +20,8 @@ st.set_page_config(
 # Custom styling
 st.markdown("""
 <style>
-    .main {
-        padding: 2rem;
-    }
-    .stTextArea textarea {
-        font-family: monospace;
-    }
+    .main { padding: 2rem; }
+    .stTextArea textarea { font-family: monospace; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -35,13 +31,15 @@ st.markdown("""
 
 def detect_citation_type(url):
     """
-    Automatically detect if URL is an AG Annual Report or Ontario News Release.
-    Returns 'ag' or 'news' or None if unrecognized.
+    Automatically detect if URL is an AG Annual Report, Ontario News Release, or Ontario e-Laws.
+    Returns 'ag', 'news', 'elaws', or None if unrecognized.
     """
     if 'auditor.on.ca' in url:
         return 'ag'
     elif 'news.ontario.ca' in url:
         return 'news'
+    elif 'ontario.ca/laws/statute' in url or 'ontario.ca/laws/regulation' in url:
+        return 'elaws'
     else:
         return None
 
@@ -63,9 +61,11 @@ def extract_year_from_url(url):
             else:
                 year = '20' + year
         return year
+    
     match = re.search(r'19\d{2}|20\d{2}', url)
     if match:
         return match.group(0)
+    
     return None
 
 def extract_chapter_section_from_filename(filename):
@@ -77,6 +77,7 @@ def extract_chapter_section_from_filename(filename):
             return chapter, f"{chapter}.{section_digits}"
         else:
             return chapter, None
+    
     match = re.search(r'^(\d)(\d{2})en\d{2}', filename)
     if match:
         chapter = match.group(1)
@@ -85,6 +86,7 @@ def extract_chapter_section_from_filename(filename):
             return chapter, f"{chapter}.{section_digits}"
         else:
             return chapter, None
+    
     return None, None
 
 def extract_title_from_pdf_metadata(url):
@@ -92,6 +94,7 @@ def extract_title_from_pdf_metadata(url):
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
+        
         pdf_file = BytesIO(response.content)
         with pdfplumber.open(pdf_file) as pdf:
             metadata = pdf.metadata
@@ -105,7 +108,7 @@ def extract_title_from_pdf_metadata(url):
                 title = re.sub(r'^\d+\.\d{2}\s*:\s*', '', title)
                 title = re.sub(r'^\d+\.\d{2}\s+', '', title)
                 return title if title else None
-        return None
+            return None
     except:
         return None
 
@@ -114,6 +117,7 @@ def extract_title_from_html(url):
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+        
         soup = BeautifulSoup(response.content, 'html.parser')
         for tag in ['h1', 'h2', 'h3']:
             heading = soup.find(tag)
@@ -121,6 +125,7 @@ def extract_title_from_html(url):
                 title = heading.text.strip()
                 if "Office of the Auditor General" not in title and "Auditor General" not in title:
                     return title
+        
         content_area = soup.find(['div', 'section'], class_=re.compile('content|main|article', re.I))
         if content_area:
             heading = content_area.find(['h1', 'h2', 'h3'])
@@ -128,6 +133,7 @@ def extract_title_from_html(url):
                 title = heading.text.strip()
                 if "Office of the Auditor General" not in title:
                     return title
+        
         return None
     except:
         return None
@@ -136,15 +142,19 @@ def fetch_ag_citation(url):
     year = extract_year_from_url(url)
     if not year:
         return None, "Could not extract year"
+    
     org_name = "Office of the Auditor General of Ontario"
     year_report = f"{year} Annual Report"
+    
     if is_pdf_url(url):
         title = extract_title_from_pdf_metadata(url)
         if not title:
             return None, "Could not extract title from PDF"
+        
         filename = url.split('/')[-1]
         chapter, section = extract_chapter_section_from_filename(filename)
         title = ' '.join(title.split())
+        
         if chapter and section:
             citation = f'{org_name}, "[{title}]({url})", Chapter {chapter}, Section {section}, *{year_report}*.'
         elif chapter:
@@ -155,8 +165,10 @@ def fetch_ag_citation(url):
         title = extract_title_from_html(url)
         if not title:
             return None, "Could not extract title from page"
+        
         title = ' '.join(title.split())
         citation = f'{org_name}, "[{title}]({url})", *{year_report}*.'
+    
     return citation, None
 
 # ================================================================
@@ -199,20 +211,102 @@ def fetch_news_release_citation(url):
     
     try:
         data = response.json()['data']
-        
         main_ministry = data.get('ministry_name', '')
         partner_ministries = data.get('partner_ministries', [])
         ministries_str = format_ministries(main_ministry, partner_ministries)
-        
         title = data.get('content_title', 'No title')
         release_type = data.get('release_type_name', 'News Release').lower()
         date_str = data.get('release_date_time_formatted', '')
         
         citation = f'{ministries_str}, "[{title}]({url})", *{release_type}*, {date_str}.'
-        
         return citation, None
     except Exception as e:
         return None, f"Error parsing data: {e}"
+
+# ================================================================
+# ONTARIO E-LAWS FUNCTIONS (STATUTES & REGULATIONS)
+# ================================================================
+
+def fetch_elaws_citation(url):
+    """
+    Extract titles from Ontario e-Laws (statutes or regulations),
+    and extract section reference if present in URL anchor/parameters.
+    
+    For statutes: Returns both full and short titles
+    For regulations: Returns only short title (O. Reg. X/YY)
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract the full title from page title
+        page_title = soup.title.string if soup.title else ""
+        
+        # Determine if this is a statute or regulation
+        is_regulation = 'regulation' in url
+        
+        if page_title:
+            # Remove trailing descriptions after the main legislation title
+            full_title_match = re.search(r'^([^-]+)', page_title)
+            full_title = full_title_match.group(1).strip() if full_title_match else page_title
+            
+            if is_regulation:
+                # For regulations, extract ONLY short form: "O. Reg. 221/08"
+                short_match = re.match(r'^(O\.\s*Reg\.\s*\d+/\d+)', full_title)
+                short_title = short_match.group(1) if short_match else full_title
+                # For regs, we only return short title
+                full_title = None
+            else:
+                # For statutes, extract short title: "Early Childhood Educators Act, 2007"
+                short_title_match = re.match(r'^([^,]+, \d{4})', full_title)
+                short_title = short_title_match.group(1) if short_title_match else full_title
+        else:
+            full_title = "Legislation"
+            short_title = "Legislation"
+        
+        # Extract section from URL anchor (#)
+        section = None
+        
+        if '#' in url:
+            anchor = url.split('#')[1].split('?')[0]
+            if anchor and anchor.startswith('BK'):
+                anchor_element = soup.find(attrs={'id': anchor})
+                if anchor_element:
+                    for parent in anchor_element.parents:
+                        section_heading = parent.find(['h2', 'h3', 'strong'])
+                        if section_heading:
+                            section_text = section_heading.get_text().strip()
+                            section_match = re.match(r'^(\d+)', section_text)
+                            if section_match:
+                                section = section_match.group(1)
+                                break
+        
+        # Remove query parameters and anchors from URL for clean citation
+        clean_url = url.split('?')[0].split('#')[0]
+        
+        return {
+            'full_title': full_title,
+            'short_title': short_title,
+            'section': section,
+            'clean_url': clean_url,
+            'is_regulation': is_regulation,
+            'full_citation': f"[{full_title}]({clean_url})" + (f", s. {section}." if section else ".") if full_title else None,
+            'short_citation': f"[{short_title}]({clean_url})" + (f", s. {section}." if section else ".")
+        }
+    
+    except Exception as e:
+        return {
+            'error': str(e),
+            'full_title': None,
+            'short_title': None,
+            'section': None,
+            'is_regulation': 'regulation' in url
+        }
 
 # ================================================================
 # SHARED DOCX FUNCTIONS
@@ -221,37 +315,48 @@ def fetch_news_release_citation(url):
 def add_hyperlink(paragraph, text, url):
     part = paragraph.part
     r_id = part.relate_to(url, reltype="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+    
     hyperlink = OxmlElement('w:hyperlink')
     hyperlink.set(qn('r:id'), r_id)
+    
     new_run = OxmlElement('w:r')
     rPr = OxmlElement('w:rPr')
+    
     u = OxmlElement('w:u')
     u.set(qn('w:val'), 'single')
     rPr.append(u)
+    
     color = OxmlElement('w:color')
     color.set(qn('w:val'), '0000FF')
     rPr.append(color)
+    
     rFonts = OxmlElement('w:rFonts')
     rFonts.set(qn('w:ascii'), 'Arial')
     rFonts.set(qn('w:hAnsi'), 'Arial')
     rPr.append(rFonts)
+    
     new_run.append(rPr)
     text_elem = OxmlElement('w:t')
     text_elem.text = text
     new_run.append(text_elem)
+    
     hyperlink.append(new_run)
     paragraph._p.append(hyperlink)
+    
     return hyperlink
 
 def generate_docx(citation_texts):
     doc = Document()
+    
     for citation_md in citation_texts:
         p = doc.add_paragraph()
         pattern = re.compile(r'(\[.*?\]\(.*?\)|\*.*?\*|_.*?_)')
         parts = pattern.split(citation_md)
+        
         for part in parts:
             if not part:
                 continue
+            
             if part.startswith('[') and '](' in part and part.endswith(')'):
                 link_text = re.findall(r'\[(.*?)\]', part)[0]
                 link_url = re.findall(r'\((.*?)\)', part)[0]
@@ -265,7 +370,9 @@ def generate_docx(citation_texts):
                 run = p.add_run(part)
                 run.font.name = 'Arial'
                 run.font.size = Pt(11)
+        
         p.add_run('\n')
+    
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -280,38 +387,46 @@ st.markdown("Generate formatted citations for a variety of sources automatically
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    
     st.divider()
+    
     st.subheader("💡 Instructions")
     st.markdown("""
-    1. Paste URLs (AG Annual Reports and/or Ontario News Releases)
-    2. Click "Generate Citations"
-    3. Download as DOCX
+1. Paste URLs (AG Annual Reports, Ontario News Releases, or e-Laws)
+2. Click "Generate Citations"
+3. Download as DOCX
 
-    **Supported:**
-    - AG Annual Reports (HTML, PDF)
-    - Ontario News Releases (HTML)
-    - Mix both types in one batch
+**Supported:**
+- AG Annual Reports (HTML, PDF)
+- Ontario News Releases (HTML)
+- Ontario e-Laws Statutes & Regulations
+- Mix any types in one batch
     """)
     
     st.divider()
+    
     st.subheader("📚 Example URLs")
     with st.expander("View examples"):
         st.code("""https://www.auditor.on.ca/en/content/annualreports/audits/en2024/AR-PA_ONlandtribunal_en24.html
 
 https://news.ontario.ca/en/release/1006488/ontario-welcomes-207-million-investment-in-the-advanced-manufacturing-sector
 
-https://www.auditor.on.ca/en/content/annualreports/arreports/en18/v1_306en18.pdf""")
+https://www.auditor.on.ca/en/content/annualreports/arreports/en18/v1_306en18.pdf
+
+https://www.ontario.ca/laws/statute/07e07
+
+https://www.ontario.ca/laws/regulation/080221""")
 
 st.markdown("### 📋 Paste Your URLs")
+
 urls_input = st.text_area(
-    "Enter URLs (AG Annual Reports and/or Ontario News Releases - one per line):",
+    "Enter URLs (AG Annual Reports, Ontario News Releases, or e-Laws - one per line):",
     height=200,
     placeholder="Paste URLs here...",
     label_visibility="collapsed"
 )
 
 col1, col2 = st.columns([1, 3])
+
 with col1:
     generate_btn = st.button("🚀 Generate Citations", use_container_width=True)
 
@@ -320,12 +435,14 @@ if generate_btn:
         st.warning("⚠️ Please enter at least one URL")
     else:
         urls = [url.strip() for url in urls_input.split('\n') if url.strip()]
+        
         st.markdown("---")
         st.markdown("### 📝 Results")
+        
         citations = []
         progress_bar = st.progress(0)
         status_container = st.container()
-
+        
         for i, url in enumerate(urls):
             progress = (i + 1) / len(urls)
             progress_bar.progress(progress)
@@ -337,32 +454,55 @@ if generate_btn:
                     
                     if citation_type == 'ag':
                         citation, error = fetch_ag_citation(url)
+                        if error:
+                            st.error(f"❌ {url}\n{error}")
+                        else:
+                            citations.append((url, citation, 'ag'))
+                            st.success(f"✓ {url[:70]}...")
+                    
                     elif citation_type == 'news':
                         citation, error = fetch_news_release_citation(url)
-                    else:
-                        error = "URL is not a recognized AG Annual Report or Ontario News Release"
-                        citation = None
+                        if error:
+                            st.error(f"❌ {url}\n{error}")
+                        else:
+                            citations.append((url, citation, 'news'))
+                            st.success(f"✓ {url[:70]}...")
                     
-                    if error:
-                        st.error(f"❌ {url}\n{error}")
+                    elif citation_type == 'elaws':
+                        citation_data = fetch_elaws_citation(url)
+                        if 'error' in citation_data:
+                            st.error(f"❌ {url}\n{citation_data['error']}")
+                        else:
+                            # Display results for e-Laws
+                            st.success(f"✓ {url[:70]}...")
+                            
+                            # Show both full and short for statutes, only short for regs
+                            if citation_data['full_title']:
+                                st.markdown("**Full Title Citation:**")
+                                st.code(citation_data['full_citation'], language="markdown")
+                                st.markdown("**Short Title Citation:**")
+                                st.code(citation_data['short_citation'], language="markdown")
+                                citations.append((url, citation_data['full_citation'], 'elaws'))
+                            else:
+                                st.markdown("**Citation:**")
+                                st.code(citation_data['short_citation'], language="markdown")
+                                citations.append((url, citation_data['short_citation'], 'elaws'))
+                            
+                            if citation_data['section']:
+                                st.caption(f"📌 Section Referenced: s. {citation_data['section']}")
+                    
                     else:
-                        citations.append((url, citation))
-                        st.success(f"✓ {url[:70]}...")
-
+                        st.error(f"❌ {url}\nURL is not recognized. Please check the URL format.")
+        
         progress_bar.empty()
-
+        
         if citations:
-            all_citation_texts = [c for _, c in citations]
-            
+            all_citation_texts = [c[1] for c in citations]
             docx_buffer = generate_docx(all_citation_texts)
+            
             st.download_button(
                 label="📥 Download All Citations (Word DOCX)",
                 data=docx_buffer,
                 file_name="Citations.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
-
-
-
-
-
